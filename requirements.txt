@@ -1,6 +1,4 @@
 fastapi
 uvicorn
-onnxruntime==1.17.1
-numpy
 huggingface_hub
 pydantic

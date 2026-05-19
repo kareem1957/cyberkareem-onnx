@@ -1,28 +1,87 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import numpy as np
-from huggingface_hub import hf_hub_download
-import onnxruntime as ort
+import re
 
 app = FastAPI(title="CyberKareem URL Detector API")
 
-SPAM_KEYWORDS = [
-    "win", "winner", "prize", "offer", "deal", "discount", "sale", "free",
-    "buy now", "limited time", "click here", "subscribe", "unsubscribe",
-    "congratulations", "selected", "reward", "gift", "claim", "promotion",
-    "advertisement", "marketing", "shop", "order now", "exclusive", "percent off"
-]
-
-print("Loading model...")
-model_path = hf_hub_download(
-    repo_id="Kareem171833/cyberkareem-model",
-    filename="model.onnx"
-)
-session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
-print("Model ready!")
-
 class URLRequest(BaseModel):
     url: str
+
+PHISHING_PATTERNS = [
+    r'paypal.*secure', r'secure.*paypal', r'bank.*login', r'login.*bank',
+    r'verify.*account', r'account.*verify', r'confirm.*identity',
+    r'update.*credentials', r'credentials.*update', r'suspended.*account',
+    r'account.*suspended', r'unusual.*activity', r'security.*alert',
+    r'click.*here.*verify', r'limited.*time.*offer', r'winner.*prize',
+    r'free.*gift', r'congratulations.*won', r'reset.*password.*now',
+]
+
+SUSPICIOUS_DOMAINS = [
+    'secure-', 'login-', 'verify-', 'account-', 'update-', 'confirm-',
+    '-secure', '-login', '-verify', '-account', '-update', '-confirm',
+    'paypal', 'amazon', 'apple', 'microsoft', 'google', 'facebook',
+    'instagram', 'netflix', 'bank', 'signin', 'webscr'
+]
+
+SUSPICIOUS_TLDS = [
+    '.xyz', '.top', '.club', '.online', '.site', '.tk', '.ml', '.ga',
+    '.cf', '.gq', '.work', '.click', '.link', '.loan', '.win', '.download'
+]
+
+def analyze_url(url: str) -> dict:
+    url_lower = url.lower()
+    score = 0
+
+    for pattern in PHISHING_PATTERNS:
+        if re.search(pattern, url_lower):
+            score += 30
+            break
+
+    try:
+        domain = url_lower.split('/')[2] if '/' in url_lower else url_lower
+        for keyword in SUSPICIOUS_DOMAINS:
+            if keyword in domain:
+                score += 20
+                break
+    except:
+        pass
+
+    for tld in SUSPICIOUS_TLDS:
+        if url_lower.endswith(tld) or tld + '/' in url_lower:
+            score += 25
+            break
+
+    if re.search(r'https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', url_lower):
+        score += 40
+
+    try:
+        domain = url_lower.split('/')[2] if '/' in url_lower else url_lower
+        if domain.count('.') > 3:
+            score += 15
+    except:
+        pass
+
+    if len(url) > 100:
+        score += 10
+
+    if '@' in url:
+        score += 30
+
+    if url_lower.startswith('http://'):
+        score += 10
+
+    score = min(score, 100)
+    legit_pct = round(100 - score, 2)
+    phish_pct = round(float(score), 2)
+
+    return {
+        "label": "PHISHING" if score >= 40 else "LEGIT",
+        "confidence": max(legit_pct, phish_pct),
+        "scores": {
+            "legit": legit_pct,
+            "phishing": phish_pct
+        }
+    }
 
 @app.get("/")
 def root():
@@ -30,27 +89,4 @@ def root():
 
 @app.post("/predict")
 def predict(req: URLRequest):
-    inputs = {"inputs": np.array([req.url])}
-    label, probs = session.run(["label", "probabilities"], inputs)
-
-    legit_pct = round(float(probs[0][0]) * 100, 2)
-    phish_pct = round(float(probs[0][1]) * 100, 2)
-
-    text_lower = req.url.lower()
-    has_spam = any(word in text_lower for word in SPAM_KEYWORDS)
-
-    if label[0] == 1 and phish_pct >= 60:
-        result_label = "PHISHING"
-    elif has_spam and phish_pct < 60:
-        result_label = "SPAM"
-    else:
-        result_label = "LEGIT"
-
-    return {
-        "label": result_label,
-        "confidence": max(legit_pct, phish_pct),
-        "scores": {
-            "legit": legit_pct,
-            "phishing": phish_pct
-        }
-    }
+    return analyze_url(req.url)
